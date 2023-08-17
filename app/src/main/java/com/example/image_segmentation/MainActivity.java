@@ -1,17 +1,29 @@
 package com.example.image_segmentation;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
+
+//import com.example.image_segmentation.CameraActivity;
 
 import org.pytorch.IValue;
 import org.pytorch.LiteModuleLoader;
@@ -26,14 +38,13 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Map;
 
-
 public class MainActivity extends AppCompatActivity implements Runnable {
     private ImageView mImageView;
     private Button mButtonSegment;
     private ProgressBar mProgressBar;
     private Bitmap mBitmap = null;
     private Module mModule = null;
-    private String mImagename = "deeplab.jpg";
+    private String picturePath = null;
 
     // see http://host.robots.ox.ac.uk:8080/pascal/VOC/voc2007/segexamples/index.html for the list of classes with indexes
     private static final int CLASSNUM = 21;
@@ -60,38 +71,45 @@ public class MainActivity extends AppCompatActivity implements Runnable {
         }
     }
 
+    private ActivityResultLauncher<Intent> mStartForResult;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        try {
-            mBitmap = BitmapFactory.decodeStream(getAssets().open(mImagename));
-        } catch (IOException e) {
-            Log.e("ImageSegmentation", "Error reading assets", e);
-            finish();
-        }
-
         mImageView = findViewById(R.id.imageView);
-        mImageView.setImageBitmap(mBitmap);
+
+        mStartForResult = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    if (result.getResultCode() == Activity.RESULT_OK) {
+                        Intent data = result.getData();
+                        Uri selectedImage = data.getData();
+                        String[] filePathColumn = {MediaStore.Images.Media.DATA};
+                        Cursor cursor = getContentResolver().query(selectedImage, filePathColumn, null, null, null);
+                        cursor.moveToFirst();
+                        int columnIndex = cursor.getColumnIndex(filePathColumn[0]);
+                        picturePath = cursor.getString(columnIndex);
+                        cursor.close();
+                        mBitmap = BitmapFactory.decodeFile(picturePath);
+                        try {
+                            mBitmap = rotateImageIfRequired(MainActivity.this, mBitmap, selectedImage);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                        mImageView.setImageBitmap(mBitmap);
+                    }
+                }
+        );
 
         final Button buttonRestart = findViewById(R.id.restartButton);
         buttonRestart.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                if (mImagename == "deeplab.jpg")
-                    mImagename = "dog.jpg";
-                else
-                    mImagename = "deeplab.jpg";
-                try {
-                    mBitmap = BitmapFactory.decodeStream(getAssets().open(mImagename));
-                    mImageView.setImageBitmap(mBitmap);
-                } catch (IOException e) {
-                    Log.e("ImageSegmentation", "Error reading assets", e);
-                    finish();
-                }
+                Intent intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+                mStartForResult.launch(intent);
             }
         });
-
 
         mButtonSegment = findViewById(R.id.segmentButton);
         mProgressBar = (ProgressBar) findViewById(R.id.progressBar);
@@ -112,10 +130,20 @@ public class MainActivity extends AppCompatActivity implements Runnable {
             Log.e("ImageSegmentation", "Error reading assets", e);
             finish();
         }
+
+        final Button buttonCamera = findViewById(R.id.cameraButton);
+        buttonCamera.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                // Camera 버튼 클릭 시 CameraActivity로 이동하는 로직 추가
+                Intent intent = new Intent(MainActivity.this, CameraxActivity.class);
+                startActivity(intent);
+            }
+        });
     }
 
     @Override
     public void run() {
+        mBitmap = BitmapFactory.decodeFile(picturePath);
         final Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(mBitmap,
                 TensorImageUtils.TORCHVISION_NORM_MEAN_RGB, TensorImageUtils.TORCHVISION_NORM_STD_RGB);
         final float[] inputs = inputTensor.getDataAsFloatArray();
@@ -148,24 +176,43 @@ public class MainActivity extends AppCompatActivity implements Runnable {
                 else if (maxi == SHEEP)
                     intValues[maxj * width + maxk] = 0xFF0000FF;
                 else
-                    intValues[maxj * width + maxk] = 0xFF000000;
+                    intValues[maxj * width + maxk] = 0xFFFFFFFF;
             }
         }
 
-        Bitmap bmpSegmentation = Bitmap.createScaledBitmap(mBitmap, width, height, true);
-        Bitmap outputBitmap = bmpSegmentation.copy(bmpSegmentation.getConfig(), true);
-        outputBitmap.setPixels(intValues, 0, outputBitmap.getWidth(), 0, 0, outputBitmap.getWidth(), outputBitmap.getHeight());
-        final Bitmap transferredBitmap = Bitmap.createScaledBitmap(outputBitmap, mBitmap.getWidth(), mBitmap.getHeight(), true);
-
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                mImageView.setImageBitmap(transferredBitmap);
-                mButtonSegment.setEnabled(true);
-                mButtonSegment.setText(getString(R.string.segment));
-                mProgressBar.setVisibility(ProgressBar.INVISIBLE);
-
-            }
+        final Bitmap outBitmap = Bitmap.createBitmap(intValues, width, height, Bitmap.Config.ARGB_8888);
+        runOnUiThread(() -> {
+            mImageView.setImageBitmap(outBitmap);
+            mProgressBar.setVisibility(ProgressBar.INVISIBLE);
+            mButtonSegment.setText(R.string.segment);
+            mButtonSegment.setEnabled(true);
         });
+    }
+    private Bitmap rotateImageIfRequired(Context context, Bitmap img, Uri selectedImage) throws IOException {
+        InputStream input = context.getContentResolver().openInputStream(selectedImage);
+        ExifInterface ei;
+        if (Build.VERSION.SDK_INT > 23)
+            ei = new ExifInterface(input);
+        else
+            ei = new ExifInterface(selectedImage.getPath());
+
+        int orientation = ei.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_ROTATE_90:
+                return rotateImage(img, 90);
+            case ExifInterface.ORIENTATION_ROTATE_180:
+                return rotateImage(img, 180);
+            case ExifInterface.ORIENTATION_ROTATE_270:
+                return rotateImage(img, 270);
+            default:
+                return img;
+        }
+    }
+
+    private static Bitmap rotateImage(Bitmap img, int degree) {
+        Matrix matrix = new Matrix();
+        matrix.postRotate(degree);
+        return Bitmap.createBitmap(img, 0, 0, img.getWidth(), img.getHeight(), matrix, true);
     }
 }
